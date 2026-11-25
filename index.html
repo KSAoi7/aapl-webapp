@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AAPL CSV Explorer</title>
+<style>
+  /* ---- Reset & base ---- */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: #f5f7fa;
+    color: #1a1a2e;
+    line-height: 1.6;
+    padding: 24px;
+  }
+
+  /* ---- Layout ---- */
+  .container { max-width: 960px; margin: 0 auto; }
+  header { text-align: center; margin-bottom: 32px; }
+  header h1 { font-size: 1.8rem; font-weight: 700; color: #1a1a2e; }
+  header p  { color: #667; font-size: .95rem; margin-top: 4px; }
+
+  /* ---- Upload card ---- */
+  .card {
+    background: #fff;
+    border-radius: 12px;
+    padding: 28px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.08);
+    margin-bottom: 24px;
+  }
+  .upload-area {
+    border: 2px dashed #cbd5e1;
+    border-radius: 10px;
+    padding: 40px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color .2s, background .2s;
+  }
+  .upload-area:hover { border-color: #3b82f6; background: #f8faff; }
+  .upload-area.dragover { border-color: #3b82f6; background: #eff6ff; }
+  .upload-area p { color: #667; }
+  .upload-area strong { color: #3b82f6; }
+  .upload-area input[type="file"] { display: none; }
+  .file-name {
+    margin-top: 12px;
+    font-size: .9rem;
+    color: #475;
+    word-break: break-all;
+  }
+
+  /* ---- Error / info banners ---- */
+  .banner {
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-top: 16px;
+    font-size: .92rem;
+    display: none;
+  }
+  .banner.error   { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; display: block; }
+  .banner.success { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; display: block; }
+
+  /* ---- Stats grid ---- */
+  #stats-section { display: none; }
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 16px;
+    margin-bottom: 8px;
+  }
+  .stat-item {
+    background: #fff;
+    border-radius: 10px;
+    padding: 18px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06);
+    text-align: center;
+  }
+  .stat-item .label { font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: #888; }
+  .stat-item .value { font-size: 1.25rem; font-weight: 600; margin-top: 6px; }
+
+  /* ---- Chart ---- */
+  #chart-section { display: none; }
+  #chart-section canvas { width: 100%; }
+
+  /* ---- Misc ---- */
+  .hint { font-size: .85rem; color: #999; margin-top: 8px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <h1>AAPL CSV Explorer</h1>
+    <p>Upload a CSV with <code>Date</code> and <code>Close</code> columns to see stats &amp; a price chart.</p>
+  </header>
+
+  <!-- Upload -->
+  <div class="card">
+    <label class="upload-area" id="dropZone" for="fileInput">
+      <p><strong>Click to choose a CSV file</strong> or drag &amp; drop it here</p>
+      <p style="font-size:.83rem;">Expected columns: <code>Date</code>, <code>Close</code> (others like Open, High, Low, Volume are fine too)</p>
+      <input type="file" id="fileInput" accept=".csv,text/csv">
+    </label>
+    <div class="file-name" id="fileName"></div>
+    <div class="banner" id="banner"></div>
+  </div>
+
+  <!-- Stats -->
+  <div id="stats-section">
+    <div class="card">
+      <h2 style="font-size:1.1rem;margin-bottom:16px;">Summary</h2>
+      <div class="stats-grid" id="statsGrid"></div>
+    </div>
+  </div>
+
+  <!-- Chart -->
+  <div id="chart-section">
+    <div class="card">
+      <h2 style="font-size:1.1rem;margin-bottom:16px;">Close Price Over Time</h2>
+      <canvas id="chart" height="360"></canvas>
+    </div>
+  </div>
+
+  <p class="hint">No data leaves your browser. Everything is parsed locally.</p>
+</div>
+
+<script>
+/* =========================================================================
+   Minimal CSV parser (handles quoted fields, commas inside quotes, CRLF)
+   ========================================================================= */
+function parseCSV(text) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+
+    if (inQuotes) {
+      if (ch === '"' && next === '"') { field += '"'; i++; }
+      else if (ch === '"') { inQuotes = false; }
+      else { field += ch; }
+    } else {
+      if (ch === '"') { inQuotes = true; }
+      else if (ch === ',') { row.push(field); field = ""; }
+      else if (ch === '\n') { row.push(field); rows.push(row); row = []; field = ""; }
+      else if (ch === '\r') { /* skip — handled by \n */ }
+      else { field += ch; }
+    }
+  }
+  // last field / last row
+  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+  // drop trailing empty rows
+  while (rows.length && rows[rows.length - 1].length === 1 && rows[rows.length - 1][0].trim() === "") {
+    rows.pop();
+  }
+  return rows;
+}
+
+/* Convert raw CSV rows into array of objects keyed by header names */
+function rowsToObjects(rows) {
+  if (rows.length < 2) throw new Error("The CSV file appears to be empty or has no data rows.");
+  const headers = rows[0].map(h => h.trim());
+  const objects = [];
+  for (let r = 1; r < rows.length; r++) {
+    const obj = {};
+    for (let c = 0; c < headers.length; c++) {
+      obj[headers[c]] = (rows[r][c] !== undefined ? rows[r][c] : "").trim();
+    }
+    objects.push(obj);
+  }
+  return { headers, objects };
+}
+
+/* =========================================================================
+   Main processing pipeline
+   ========================================================================= */
+function processCSV(text, fileName) {
+  const banner = document.getElementById("banner");
+  banner.className = "banner";
+
+  // Parse
+  let parsed;
+  try {
+    const rawRows = parseCSV(text);
+    parsed = rowsToObjects(rawRows);
+  } catch (e) {
+    showBanner("error", "Could not parse the CSV file: " + e.message);
+    hideSections();
+    return;
+  }
+
+  const { headers, objects } = parsed;
+
+  // ---- Validate required columns ----
+  const dateCol = findColumn(headers, ["Date", "date", "DATE"]);
+  const closeCol = findColumn(headers, ["Close", "close", "CLOSE", "Adj Close", "adj close"]);
+
+  if (!dateCol) {
+    showBanner("error", "Missing required column: \"Date\". Found columns: " + headers.join(", "));
+    hideSections();
+    return;
+  }
+  if (!closeCol) {
+    showBanner("error", "Missing required column: \"Close\". Found columns: " + headers.join(", "));
+    hideSections();
+    return;
+  }
+
+  // ---- Build clean data arrays ----
+  const dates = [];
+  const closes = [];
+  for (const row of objects) {
+    const dVal = row[dateCol];
+    const cVal = row[closeCol];
+    if (!dVal || !cVal) continue;            // skip blank rows
+    const cNum = parseFloat(cVal);
+    if (isNaN(cNum)) continue;               // skip non-numeric close
+    dates.push(dVal);
+    closes.push(cNum);
+  }
+
+  if (closes.length === 0) {
+    showBanner("error", "No valid numeric Close values found in the file.");
+    hideSections();
+    return;
+  }
+
+  // ---- Stats ----
+  let min = closes[0], max = closes[0], sum = 0;
+  for (const v of closes) { if (v < min) min = v; if (v > max) max = v; sum += v; }
+  const mean = sum / closes.length;
+  const dateRange = dates[0] + "  →  " + dates[dates.length - 1];
+
+  // ---- Render stats ----
+  document.getElementById("stats-section").style.display = "block";
+  const grid = document.getElementById("statsGrid");
+  grid.innerHTML = "";
+  const stats = [
+    { label: "Rows",          value: closes.length.toLocaleString() },
+    { label: "Date Range",    value: dateRange },
+    { label: "Mean Close",    value: mean.toFixed(2) },
+    { label: "Min Close",     value: min.toFixed(2) },
+    { label: "Max Close",     value: max.toFixed(2) }
+  ];
+  for (const s of stats) {
+    const div = document.createElement("div");
+    div.className = "stat-item";
+    div.innerHTML = `<div class="label">${s.label}</div><div class="value">${s.value}</div>`;
+    grid.appendChild(div);
+  }
+
+  // ---- Draw chart ----
+  document.getElementById("chart-section").style.display = "block";
+  drawChart(dates, closes);
+
+  // ---- Success banner ----
+  showBanner("success",
+    "Loaded \"" + fileName + "\" — " + closes.length + " rows, columns: " + headers.join(", "));
+}
+
+/* Case-insensitive column lookup from a list of candidate names */
+function findColumn(headers, candidates) {
+  const lowerHeaders = headers.map(h => h.toLowerCase());
+  for (const cand of candidates) {
+    const idx = lowerHeaders.indexOf(cand.toLowerCase());
+    if (idx !== -1) return headers[idx];
+  }
+  return null;
+}
+
+/* =========================================================================
+   Lightweight Canvas line chart (no external libraries)
+   ========================================================================= */
+function drawChart(dates, closes) {
+  const canvas = document.getElementById("chart");
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.parentElement.clientWidth - 0;
+  const cssH = 360;
+  canvas.width = cssW * dpr;
+  canvas.height = cssH * dpr;
+  canvas.style.width = cssW + "px";
+  canvas.style.height = cssH + "px";
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const pad = { top: 20, right: 20, bottom: 50, left: 70 };
+  const plotW = cssW - pad.left - pad.right;
+  const plotH = cssH - pad.top - pad.bottom;
+
+  const yMin = Math.min(...closes);
+  const yMax = Math.max(...closes);
+  const yPad = (yMax - yMin) * 0.08;
+  const yLo = yMin - yPad;
+  const yHi = yMax + yPad;
+
+  const xFor = i => pad.left + (i / (closes.length - 1)) * plotW;
+  const yFor = v => pad.top + (1 - (v - yLo) / (yHi - yLo)) * plotH;
+
+  // ---- Y-axis grid + labels ----
+  ctx.strokeStyle = "#e5e7eb";
+  ctx.fillStyle = "#6b7280";
+  ctx.font = "11px sans-serif";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  const yTicks = 5;
+  for (let t = 0; t <= yTicks; t++) {
+    const val = yLo + (yHi - yLo) * (t / yTicks);
+    const y = yFor(val);
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + plotW, y); ctx.stroke();
+    ctx.fillText(val.toFixed(2), pad.left - 8, y);
+  }
+
+  // ---- X-axis labels (first, middle, last) ----
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  const xLabelIdxs = [0, Math.floor(closes.length / 2), closes.length - 1];
+  for (const idx of xLabelIdxs) {
+    ctx.fillText(dates[idx], xFor(idx), pad.top + plotH + 8);
+  }
+
+  // ---- Axis lines ----
+  ctx.strokeStyle = "#9ca3af";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(pad.left, pad.top);
+  ctx.lineTo(pad.left, pad.top + plotH);
+  ctx.lineTo(pad.left + plotW, pad.top + plotH);
+  ctx.stroke();
+
+  // ---- Line ----
+  ctx.strokeStyle = "#3b82f6";
+  ctx.lineWidth = 2;
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  for (let i = 0; i < closes.length; i++) {
+    const x = xFor(i), y = yFor(closes[i]);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // ---- Fill under line ----
+  ctx.lineTo(xFor(closes.length - 1), pad.top + plotH);
+  ctx.lineTo(xFor(0), pad.top + plotH);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(59,130,246,0.10)";
+  ctx.fill();
+}
+
+/* =========================================================================
+   UI helpers
+   ========================================================================= */
+function showBanner(type, msg) {
+  const b = document.getElementById("banner");
+  b.className = "banner " + type;
+  b.textContent = msg;
+}
+function hideSections() {
+  document.getElementById("stats-section").style.display = "none";
+  document.getElementById("chart-section").style.display = "none";
+}
+
+function handleFile(file) {
+  document.getElementById("fileName").textContent = file.name + " (" + (file.size / 1024).toFixed(1) + " KB)";
+  const reader = new FileReader();
+  reader.onload = function(e) { processCSV(e.target.result, file.name); };
+  reader.onerror = function() { showBanner("error", "Failed to read the file."); };
+  reader.readAsText(file);
+}
+
+/* ---- Event wiring ---- */
+const fileInput = document.getElementById("fileInput");
+const dropZone  = document.getElementById("dropZone");
+
+fileInput.addEventListener("change", function(e) {
+  if (e.target.files.length > 0) handleFile(e.target.files[0]);
+});
+
+dropZone.addEventListener("dragover", function(e) {
+  e.preventDefault();
+  dropZone.classList.add("dragover");
+});
+dropZone.addEventListener("dragleave", function() {
+  dropZone.classList.remove("dragover");
+});
+dropZone.addEventListener("drop", function(e) {
+  e.preventDefault();
+  dropZone.classList.remove("dragover");
+  if (e.dataTransfer.files.length > 0) {
+    const f = e.dataTransfer.files[0];
+    if (!f.name.toLowerCase().endsWith(".csv")) {
+      showBanner("error", "Please upload a .csv file. Got: " + f.name);
+      return;
+    }
+    handleFile(f);
+  }
+});
+</script>
+</body>
+</html>
